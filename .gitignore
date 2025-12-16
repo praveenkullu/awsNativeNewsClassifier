@@ -162,4 +162,9 @@ local.env
 .env.*.local
 
 # Ignore files containing sensitive information
-CONFIDENTIALS_*
+CONFIDENTIALS_*# Lambda deployment packages (built during CI/CD)
+lambda-deploy.zip
+lambda-deploy-new.zip
+package/
+*.pyc
+__pycache__/
