@@ -1,0 +1,156 @@
+version: '3.8'
+
+services:
+  # API Gateway - Main entry point
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - INFERENCE_SERVICE_URL=http://inference-service:8001
+      - FEEDBACK_SERVICE_URL=http://feedback-service:8002
+      - MODEL_SERVICE_URL=http://model-service:8003
+      - EVALUATION_SERVICE_URL=http://evaluation-service:8004
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - LOG_LEVEL=INFO
+    depends_on:
+      - inference-service
+      - feedback-service
+      - model-service
+      - evaluation-service
+      - redis
+    networks:
+      - ml-news-network
+    restart: unless-stopped
+
+  # Inference Service - Handles predictions
+  inference-service:
+    build:
+      context: .
+      dockerfile: ./services/inference-service/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MODEL_SERVICE_URL=http://model-service:8003
+      - MODEL_PATH=/app/models/default/model.pkl
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/app:/app/model
+    volumes:
+      - model-data:/app/models
+      - ./model:/app/model:ro
+    depends_on:
+      - redis
+    networks:
+      - ml-news-network
+    restart: unless-stopped
+
+  # Feedback Service - Collects user feedback
+  feedback-service:
+    build:
+      context: ./services/feedback-service
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql://mlnews:mlnews@postgres:5432/mlnews_feedback
+      - LOG_LEVEL=INFO
+    depends_on:
+      - postgres
+    networks:
+      - ml-news-network
+    restart: unless-stopped
+
+  # Model Service - Training and model management
+  model-service:
+    build:
+      context: .
+      dockerfile: ./services/model-service/Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - DATABASE_URL=postgresql://mlnews:mlnews@postgres:5432/mlnews_model
+      - TRAINING_DATA_PATH=/app/data/News_Category_Dataset_v3.json
+      - MODELS_DIR=/app/models
+      - LOG_LEVEL=INFO
+    volumes:
+      - model-data:/app/models
+      - ./data:/app/data:ro
+      - ./model:/app/model:ro
+    depends_on:
+      - postgres
+    networks:
+      - ml-news-network
+    restart: unless-stopped
+
+  # Evaluation Service - Model evaluation and retraining decisions
+  evaluation-service:
+    build:
+      context: ./services/evaluation-service
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - DATABASE_URL=postgresql://mlnews:mlnews@postgres:5432/mlnews_evaluation
+      - MODEL_SERVICE_URL=http://model-service:8003
+      - FEEDBACK_SERVICE_URL=http://feedback-service:8002
+      - PERFORMANCE_THRESHOLD=0.75
+      - CORRECTION_THRESHOLD=100
+      - LOG_LEVEL=INFO
+    depends_on:
+      - postgres
+      - model-service
+      - feedback-service
+    networks:
+      - ml-news-network
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=mlnews
+      - POSTGRES_PASSWORD=mlnews
+      - POSTGRES_DB=mlnews
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - ml-news-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlnews"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - ml-news-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  ml-news-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  model-data:

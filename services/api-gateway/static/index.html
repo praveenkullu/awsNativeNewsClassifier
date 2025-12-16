@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ML News Categorization Dashboard</title>
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/components.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>ML News Categorization</h1>
+                <button id="info-btn" class="btn-icon" aria-label="API Info" title="API Information">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Tab Navigation -->
+        <nav class="tabs" role="tablist">
+            <button class="tab active" role="tab" data-tab="predict" aria-selected="true" aria-controls="predict-tab">
+                Predict
+            </button>
+            <button class="tab" role="tab" data-tab="feedback" aria-selected="false" aria-controls="feedback-tab">
+                Feedback
+            </button>
+            <button class="tab" role="tab" data-tab="training" aria-selected="false" aria-controls="training-tab">
+                Training
+            </button>
+            <button class="tab" role="tab" data-tab="health" aria-selected="false" aria-controls="health-tab">
+                Health
+            </button>
+        </nav>
+
+        <!-- Tab Contents -->
+        <main class="content">
+            <!-- Prediction Tab -->
+            <div id="predict-tab" class="tab-content active" role="tabpanel" aria-labelledby="predict">
+                <div class="panel">
+                    <h2>News Article Prediction</h2>
+                    <p class="panel-description">Enter a news headline and optional description to predict its category.</p>
+
+                    <form id="prediction-form" class="form">
+                        <div class="form-group">
+                            <label for="headline">Headline <span class="required">*</span></label>
+                            <input
+                                type="text"
+                                id="headline"
+                                name="headline"
+                                placeholder="Enter news headline (max 500 characters)"
+                                maxlength="500"
+                                required
+                                aria-required="true"
+                            >
+                            <span class="char-count"><span id="headline-count">0</span>/500</span>
+                            <span class="error-message" id="headline-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="description">Short Description (Optional)</label>
+                            <textarea
+                                id="description"
+                                name="description"
+                                placeholder="Enter short description (max 2000 characters)"
+                                maxlength="2000"
+                                rows="4"
+                            ></textarea>
+                            <span class="char-count"><span id="description-count">0</span>/2000</span>
+                        </div>
+
+                        <button type="submit" class="btn-primary" id="predict-btn">
+                            <span class="btn-text">Predict Category</span>
+                            <span class="btn-loader" style="display: none;">Analyzing...</span>
+                        </button>
+                    </form>
+
+                    <div id="prediction-result" class="result-container"></div>
+                </div>
+            </div>
+
+            <!-- Feedback Tab -->
+            <div id="feedback-tab" class="tab-content" role="tabpanel" aria-labelledby="feedback">
+                <div class="panel">
+                    <h2>Submit Feedback</h2>
+                    <p class="panel-description">Help improve the model by providing feedback on predictions.</p>
+
+                    <form id="feedback-form" class="form">
+                        <div class="form-group">
+                            <label for="prediction-id">Prediction ID <span class="required">*</span></label>
+                            <input
+                                type="text"
+                                id="prediction-id"
+                                name="prediction_id"
+                                placeholder="pred_abc123xyz"
+                                required
+                                aria-required="true"
+                            >
+                            <span class="error-message" id="prediction-id-error"></span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="correct-category">Correct Category <span class="required">*</span></label>
+                            <select id="correct-category" name="correct_category" required aria-required="true">
+                                <option value="">-- Select Category --</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label>Feedback Type <span class="required">*</span></label>
+                            <div class="radio-group">
+                                <label class="radio-label">
+                                    <input type="radio" name="feedback_type" value="correction" required checked>
+                                    <span>Correction</span>
+                                    <small>The prediction was incorrect</small>
+                                </label>
+                                <label class="radio-label">
+                                    <input type="radio" name="feedback_type" value="confirmation">
+                                    <span>Confirmation</span>
+                                    <small>The prediction was correct</small>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="comment">Comment (Optional)</label>
+                            <textarea
+                                id="comment"
+                                name="comment"
+                                placeholder="Additional feedback or notes"
+                                rows="3"
+                            ></textarea>
+                        </div>
+
+                        <button type="submit" class="btn-primary" id="feedback-btn">
+                            <span class="btn-text">Submit Feedback</span>
+                            <span class="btn-loader" style="display: none;">Submitting...</span>
+                        </button>
+                    </form>
+                </div>
+
+                <div class="panel">
+                    <h2>Feedback Statistics</h2>
+                    <div id="feedback-stats" class="stats-container"></div>
+                </div>
+            </div>
+
+            <!-- Training Tab -->
+            <div id="training-tab" class="tab-content" role="tabpanel" aria-labelledby="training">
+                <div class="panel">
+                    <h2>Start Training Job</h2>
+                    <p class="panel-description">Configure and start a new model training job.</p>
+
+                    <form id="training-form" class="form">
+                        <div class="form-group">
+                            <label for="model-type">Model Type</label>
+                            <select id="model-type" name="model_type">
+                                <option value="logistic_regression" selected>Logistic Regression (Recommended)</option>
+                                <option value="naive_bayes">Naive Bayes</option>
+                                <option value="random_forest">Random Forest</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="include-feedback" name="include_feedback" checked>
+                                <span>Include Feedback Data</span>
+                            </label>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="training-description">Description (Optional)</label>
+                            <textarea
+                                id="training-description"
+                                name="description"
+                                placeholder="Brief description of this training run"
+                                rows="2"
+                            ></textarea>
+                        </div>
+
+                        <button type="submit" class="btn-primary" id="training-btn">
+                            <span class="btn-text">Start Training</span>
+                            <span class="btn-loader" style="display: none;">Starting...</span>
+                        </button>
+                    </form>
+                </div>
+
+                <div class="panel">
+                    <h2>Active Training Jobs</h2>
+                    <div id="training-jobs" class="jobs-container"></div>
+                </div>
+
+                <div class="panel">
+                    <h2>Model Versions</h2>
+                    <div id="model-versions" class="versions-container"></div>
+                </div>
+            </div>
+
+            <!-- Health Tab -->
+            <div id="health-tab" class="tab-content" role="tabpanel" aria-labelledby="health">
+                <div class="panel">
+                    <h2>System Health</h2>
+                    <p class="panel-description">Monitor the status of all services and dependencies.</p>
+
+                    <div id="health-status" class="health-grid"></div>
+
+                    <div class="health-footer">
+                        <button id="refresh-health" class="btn-secondary">Refresh Status</button>
+                        <span class="text-muted">Auto-refresh: <span id="auto-refresh-status">Enabled</span></span>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <span id="api-status" class="status-indicator">
+                <span class="status-dot"></span>
+                <span class="status-text">Connecting...</span>
+            </span>
+            <span class="text-muted">Last updated: <time id="last-updated">--</time></span>
+        </footer>
+
+        <!-- Toast Notifications Container -->
+        <div id="notifications" aria-live="polite" aria-atomic="true"></div>
+    </div>
+
+    <!-- Scripts - Load in order -->
+    <script src="/js/utils/dom.js"></script>
+    <script src="/js/utils/formatting.js"></script>
+    <script src="/js/utils/validation.js"></script>
+    <script src="/js/api.js"></script>
+    <script src="/js/components/notifications.js"></script>
+    <script src="/js/components/prediction.js"></script>
+    <script src="/js/components/feedback.js"></script>
+    <script src="/js/components/training.js"></script>
+    <script src="/js/components/health.js"></script>
+    <script src="/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EC2Full",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:Start*",
+        "ec2:Stop*",
+        "ec2:Reboot*",
+        "ec2:Describe*",
+        "ec2:*SecurityGroup*",
+        "ec2:*KeyPair*",
+        "ec2:CreateTags",
+        "ec2:ModifyInstanceAttribute"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3Access",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::ml-news-*",
+        "arn:aws:s3:::ml-news-*/*"
+      ]
+    },
+    {
+      "Sid": "SageMaker",
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:DescribeTrainingJob",
+        "sagemaker:ListTrainingJobs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IAMRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:AttachRolePolicy",
+        "iam:PassRole",
+        "iam:GetRole",
+        "iam:*InstanceProfile*"
+      ],
+      "Resource": [
+        "arn:aws:iam::289140051471:role/ml-news-*",
+        "arn:aws:iam::289140051471:instance-profile/ml-news-*"
+      ]
+    },
+    {
+      "Sid": "Logs",
+      "Effect": "Allow",
+      "Action": "logs:*",
+      "Resource": "*"
+    }
+  ]
+}

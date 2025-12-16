@@ -1,0 +1,107 @@
+name: Deploy Web Interface
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/api-gateway/static/**'
+      - '.github/workflows/deploy-web.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  deploy-web-interface:
+    name: Deploy Static Website to S3
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update API Gateway URL in JavaScript
+        run: |
+          API_URL="${{ secrets.API_GATEWAY_URL }}"
+
+          # Update the API client configuration
+          sed -i "s|https://.*execute-api.*amazonaws.com|${API_URL}|g" \
+            services/api-gateway/static/js/api.js
+
+          echo "✅ Updated API Gateway URL to: $API_URL"
+
+      - name: Sync static files to S3
+        run: |
+          aws s3 sync services/api-gateway/static/ \
+            s3://${{ secrets.S3_WEB_BUCKET }}/ \
+            --delete \
+            --exclude ".DS_Store" \
+            --exclude "*.md" \
+            --cache-control "public, max-age=31536000" \
+            --exclude "*.html" \
+            --region ${{ env.AWS_REGION }}
+
+          # Upload HTML files with different cache control
+          aws s3 sync services/api-gateway/static/ \
+            s3://${{ secrets.S3_WEB_BUCKET }}/ \
+            --exclude "*" \
+            --include "*.html" \
+            --cache-control "public, max-age=300" \
+            --content-type "text/html" \
+            --region ${{ env.AWS_REGION }}
+
+          echo "✅ Static files synced to S3"
+
+      - name: Set correct content types
+        run: |
+          # Ensure CSS files have correct content type
+          for file in $(aws s3 ls s3://${{ secrets.S3_WEB_BUCKET }}/css/ --recursive | awk '{print $4}'); do
+            aws s3 cp s3://${{ secrets.S3_WEB_BUCKET }}/$file \
+              s3://${{ secrets.S3_WEB_BUCKET }}/$file \
+              --content-type "text/css" \
+              --metadata-directive REPLACE \
+              --region ${{ env.AWS_REGION }}
+          done
+
+          # Ensure JS files have correct content type
+          for file in $(aws s3 ls s3://${{ secrets.S3_WEB_BUCKET }}/js/ --recursive | awk '{print $4}'); do
+            aws s3 cp s3://${{ secrets.S3_WEB_BUCKET }}/$file \
+              s3://${{ secrets.S3_WEB_BUCKET }}/$file \
+              --content-type "application/javascript" \
+              --metadata-directive REPLACE \
+              --region ${{ env.AWS_REGION }}
+          done
+
+          echo "✅ Content types updated"
+
+      - name: Verify deployment
+        run: |
+          BUCKET_URL="http://${{ secrets.S3_WEB_BUCKET }}.s3-website.${{ env.AWS_REGION }}.amazonaws.com"
+
+          echo "Testing web interface..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BUCKET_URL")
+
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "✅ Web interface is accessible"
+            echo "🔗 URL: $BUCKET_URL"
+          else
+            echo "❌ Web interface returned HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+      - name: Deployment summary
+        run: |
+          echo "🎉 Web interface deployed successfully!"
+          echo "🔗 Website URL: http://${{ secrets.S3_WEB_BUCKET }}.s3-website.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "🔗 API Gateway: ${{ secrets.API_GATEWAY_URL }}"
+          echo "✅ All static files synchronized"
