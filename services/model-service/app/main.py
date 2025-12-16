@@ -446,22 +446,40 @@ async def deploy_model(
 
     logger.info("Deploy request received", version=version, correlation_id=correlation_id)
 
-    # Find the version
+    # Check if version exists in training_jobs (in-memory) or S3
+    version_exists = False
     target_job = None
     previous_version = None
 
+    # Check in-memory training jobs first
     for job_id, job in training_jobs.items():
         if job.get('version') == version:
             target_job = job
+            version_exists = True
         if job.get('is_production', False):
             previous_version = job.get('version')
             job['is_production'] = False
 
-    if not target_job:
+    # If not found in memory, check if it exists in S3
+    if not version_exists and s3_client:
+        try:
+            response = s3_client.list_objects_v2(
+                Bucket=settings.s3_model_bucket,
+                Prefix=f'models/{version}/',
+                MaxKeys=1
+            )
+            if 'Contents' in response and response['Contents']:
+                version_exists = True
+        except Exception:
+            pass
+
+    if not version_exists:
         raise HTTPException(status_code=404, detail=f"Model version {version} not found")
 
-    target_job['is_production'] = True
-    target_job['deploy_status'] = 'active'
+    # Update in-memory job status if available
+    if target_job:
+        target_job['is_production'] = True
+        target_job['deploy_status'] = 'active'
 
     logger.info(
         "Model deployed",
@@ -473,7 +491,8 @@ async def deploy_model(
     return DeployResponse(
         version=version,
         status="deployed",
-        message="Model deployment successful",
+        message=f"Model version {version} marked for production deployment. "
+                f"Call /api/v1/reload-model on inference service to load this version.",
         previous_version=previous_version,
         correlation_id=correlation_id
     )
