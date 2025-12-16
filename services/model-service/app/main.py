@@ -345,34 +345,73 @@ async def list_model_versions(
     """List all model versions."""
     correlation_id = get_correlation_id(x_correlation_id)
 
-    # Get versions from completed training jobs (in-memory for simplicity)
     versions = []
-    for job_id, job in training_jobs.items():
-        if job['status'] == 'completed' and 'version' in job:
-            if status and job.get('deploy_status') != status:
-                continue
-            versions.append(ModelVersionInfo(
-                version=job['version'],
-                status=job.get('deploy_status', 'active'),
-                created_at=job.get('completed_at', job['created_at']),
-                metrics={
-                    'accuracy': job.get('metrics', {}).get('accuracy', 0),
-                    'f1_score': job.get('metrics', {}).get('f1_score', 0),
-                    'precision': job.get('metrics', {}).get('precision', 0),
-                    'recall': job.get('metrics', {}).get('recall', 0)
-                },
-                training_job_id=job_id,
-                is_production=job.get('is_production', False)
-            ))
 
-    # Sort by created_at descending
-    versions.sort(key=lambda x: x.created_at, reverse=True)
-    total = len(versions)
-    versions = versions[offset:offset + limit]
+    # If database is available, use it
+    if db:
+        try:
+            db_versions = await db.list_model_versions(limit=limit, offset=offset, status=status)
+            total = len(db_versions)
 
+            for v in db_versions:
+                versions.append(ModelVersionInfo(
+                    version=v.version,
+                    status=v.status or 'active',
+                    created_at=v.created_at.isoformat() if v.created_at else datetime.utcnow().isoformat(),
+                    metrics=v.metrics or {},
+                    training_job_id=v.training_job_id or '',
+                    is_production=v.is_production or False
+                ))
+
+            return ModelVersionsResponse(
+                versions=versions,
+                total=total,
+                limit=limit,
+                offset=offset,
+                correlation_id=correlation_id
+            )
+        except Exception as e:
+            logger.warning("Failed to fetch from database, falling back to S3", error=str(e))
+
+    # Fallback: read from S3 directly
+    if s3_client:
+        try:
+            response = s3_client.list_objects_v2(
+                Bucket=settings.s3_model_bucket,
+                Prefix='models/',
+                Delimiter='/'
+            )
+
+            if 'CommonPrefixes' in response:
+                for prefix in response['CommonPrefixes']:
+                    version_name = prefix['Prefix'].rstrip('/').split('/')[-1]
+                    if version_name and version_name != 'latest':
+                        versions.append(ModelVersionInfo(
+                            version=version_name,
+                            status='active',
+                            created_at=datetime.utcnow().isoformat(),
+                            metrics={},
+                            training_job_id='',
+                            is_production=False
+                        ))
+
+            total = len(versions)
+            versions = versions[offset:offset + limit]
+
+            return ModelVersionsResponse(
+                versions=versions,
+                total=total,
+                limit=limit,
+                offset=offset,
+                correlation_id=correlation_id
+            )
+        except Exception as e:
+            logger.error("Failed to list S3 model versions", error=str(e))
+
+    # Final fallback: return empty list
     return ModelVersionsResponse(
-        versions=versions,
-        total=total,
+        versions=[],
+        total=0,
         limit=limit,
         offset=offset,
         correlation_id=correlation_id
