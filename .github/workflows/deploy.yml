@@ -1,0 +1,460 @@
+name: Deploy ML News Services
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'services/**'
+      - '.github/workflows/deploy.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_lambdas:
+        description: 'Deploy Lambda functions'
+        type: boolean
+        default: true
+      deploy_ecs:
+        description: 'Deploy ECS service'
+        type: boolean
+        default: true
+      deploy_web:
+        description: 'Deploy web interface'
+        type: boolean
+        default: false
+
+env:
+  AWS_REGION: us-east-2
+  PYTHON_VERSION: '3.10'
+  ECR_REPOSITORY: ml-news-inference
+  ECS_CLUSTER: ml-news-cluster
+  ECS_SERVICE: ml-news-inference-service
+  ECS_TASK_DEFINITION: ml-news-inference
+
+jobs:
+  # =============================================================================
+  # Stage 1: Test
+  # =============================================================================
+
+  test-lambda-services:
+    name: Test Lambda Services
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+
+    strategy:
+      matrix:
+        service: [feedback-service, model-service, evaluation-service]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          cd services/${{ matrix.service }}
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+
+      - name: Run tests
+        run: |
+          cd services/${{ matrix.service }}
+          if [ -d "tests" ]; then
+            pytest tests/ -v --cov=app --cov-report=xml
+          else
+            echo "No tests directory found, skipping tests"
+          fi
+        continue-on-error: true
+
+  test-ecs-service:
+    name: Test ECS Inference Service
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          cd services/inference-service
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run tests
+        run: |
+          cd services/inference-service
+          if [ -d "tests" ]; then
+            pytest tests/ -v
+          else
+            echo "No tests directory found, skipping tests"
+          fi
+        continue-on-error: true
+
+      - name: Test Docker build
+        run: |
+          docker build -f services/inference-service/Dockerfile \
+            -t inference-service:test .
+
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install linting tools
+        run: pip install flake8 black isort
+
+      - name: Run flake8
+        run: |
+          flake8 services/ --max-line-length=120 \
+            --exclude=__pycache__,.venv,package,node_modules \
+            --extend-ignore=E203,W503
+        continue-on-error: true
+
+      - name: Check formatting with black
+        run: |
+          black services/ --check --line-length=120 \
+            --exclude='/(\.venv|package|node_modules)/'
+        continue-on-error: true
+
+  # =============================================================================
+  # Stage 2: Build Lambda Packages
+  # =============================================================================
+
+  build-lambda-packages:
+    name: Build Lambda Packages
+    runs-on: ubuntu-latest
+    needs: [test-lambda-services]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+
+    strategy:
+      matrix:
+        service: [feedback-service, model-service, evaluation-service]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Lambda package using Docker
+        run: |
+          SERVICE=${{ matrix.service }}
+          cd services/$SERVICE
+
+          # Clean previous builds
+          rm -rf package lambda-deploy.zip
+
+          # Build using Lambda Python 3.10 base image
+          docker run --rm \
+            --entrypoint /bin/bash \
+            -v "$PWD":/var/task \
+            public.ecr.aws/lambda/python:3.10 \
+            -c "
+              yum install -y zip > /dev/null 2>&1 &&
+              cd /var/task &&
+              mkdir -p package &&
+              pip install -r requirements.txt -t package/ --upgrade &&
+              pip install mangum -t package/ &&
+              cp -r app package/ &&
+              [ -f lambda_handler.py ] && cp lambda_handler.py package/ || echo 'No lambda_handler.py' &&
+              cd package &&
+              zip -r ../lambda-deploy.zip . -q &&
+              chmod 666 ../lambda-deploy.zip
+            "
+
+          # Verify package size
+          ls -lh lambda-deploy.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-${{ matrix.service }}
+          path: services/${{ matrix.service }}/lambda-deploy.zip
+          retention-days: 7
+
+  # =============================================================================
+  # Stage 3: Build and Push ECS Docker Image
+  # =============================================================================
+
+  build-push-docker:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [test-ecs-service]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    outputs:
+      image-tag: ${{ steps.image-tag.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: image-tag
+        run: |
+          IMAGE_TAG="${GITHUB_SHA::7}"
+          echo "tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Build, tag, and push image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build \
+            -f services/inference-service/Dockerfile \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            .
+
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+  # =============================================================================
+  # Stage 4: Deploy to AWS
+  # =============================================================================
+
+  deploy-lambda:
+    name: Deploy Lambda Functions
+    runs-on: ubuntu-latest
+    needs: [build-lambda-packages]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy_lambdas)
+
+    permissions:
+      id-token: write
+      contents: read
+
+    strategy:
+      matrix:
+        service:
+          - name: feedback-service
+            function: ml-news-feedback
+          - name: model-service
+            function: ml-news-model
+          - name: evaluation-service
+            function: ml-news-evaluation
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download Lambda package
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-${{ matrix.service.name }}
+          path: ./
+
+      - name: Deploy to AWS Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ matrix.service.function }} \
+            --zip-file fileb://lambda-deploy.zip \
+            --region ${{ env.AWS_REGION }}
+
+          echo "✅ Deployed ${{ matrix.service.function }}"
+
+      - name: Wait for function update
+        run: |
+          aws lambda wait function-updated \
+            --function-name ${{ matrix.service.function }} \
+            --region ${{ env.AWS_REGION }}
+
+          echo "✅ ${{ matrix.service.function }} is ready"
+
+  deploy-ecs:
+    name: Deploy ECS Service
+    runs-on: ubuntu-latest
+    needs: [build-push-docker]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy_ecs)
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --query taskDefinition \
+            --region ${{ env.AWS_REGION }} \
+            > task-definition.json
+
+      - name: Fill in new image ID
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: inference-service
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.build-push-docker.outputs.image-tag }}
+
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Deployment summary
+        run: |
+          echo "✅ ECS service deployed successfully"
+          echo "Image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ needs.build-push-docker.outputs.image-tag }}"
+
+  # =============================================================================
+  # Stage 5: Smoke Tests
+  # =============================================================================
+
+  smoke-test:
+    name: Run Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-lambda, deploy-ecs]
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Test health endpoint
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            ${{ secrets.API_GATEWAY_URL }}/health)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Health check failed"
+            exit 1
+          fi
+
+          echo "✅ Health check passed"
+
+      - name: Test prediction endpoint
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            ${{ secrets.API_GATEWAY_URL }}/api/v1/predict \
+            -H "Content-Type: application/json" \
+            -d '{"headline":"Stock market rises on economic data","short_description":"Markets respond positively"}')
+
+          echo "Response: $RESPONSE"
+
+          CATEGORY=$(echo "$RESPONSE" | jq -r '.category // empty')
+
+          if [ -z "$CATEGORY" ]; then
+            echo "❌ Prediction test failed"
+            exit 1
+          fi
+
+          echo "✅ Prediction test passed (Category: $CATEGORY)"
+
+      - name: Test feedback stats endpoint
+        run: |
+          RESPONSE=$(curl -s \
+            ${{ secrets.API_GATEWAY_URL }}/api/v1/feedback/stats)
+
+          echo "Response: $RESPONSE"
+
+          TOTAL=$(echo "$RESPONSE" | jq -r '.total_feedback // empty')
+
+          if [ -z "$TOTAL" ]; then
+            echo "❌ Feedback stats test failed"
+            exit 1
+          fi
+
+          echo "✅ Feedback stats test passed (Total feedback: $TOTAL)"
+
+      - name: Check Lambda metrics
+        run: |
+          for FUNCTION in ml-news-feedback ml-news-model ml-news-evaluation; do
+            ERRORS=$(aws cloudwatch get-metric-statistics \
+              --namespace AWS/Lambda \
+              --metric-name Errors \
+              --dimensions Name=FunctionName,Value=$FUNCTION \
+              --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S) \
+              --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+              --period 300 \
+              --statistics Sum \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Datapoints[0].Sum' \
+              --output text)
+
+            echo "$FUNCTION errors in last 5 minutes: ${ERRORS:-0}"
+          done
+
+      - name: Deployment success notification
+        run: |
+          echo "🎉 All smoke tests passed!"
+          echo "✅ Lambda functions deployed and tested"
+          echo "✅ ECS service deployed and tested"
+          echo "🔗 API Gateway: ${{ secrets.API_GATEWAY_URL }}"

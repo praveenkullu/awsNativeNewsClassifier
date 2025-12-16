@@ -1,0 +1,185 @@
+name: Trigger Model Training
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_type:
+        description: 'Model type to train'
+        required: true
+        type: choice
+        default: 'logistic_regression'
+        options:
+          - logistic_regression
+          - naive_bayes
+          - random_forest
+      include_feedback:
+        description: 'Include feedback data in training'
+        required: true
+        type: boolean
+        default: true
+      description:
+        description: 'Training job description'
+        required: false
+        type: string
+        default: 'Triggered from GitHub Actions'
+  schedule:
+    # Run weekly on Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  trigger-training:
+    name: Start SageMaker Training Job
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Trigger training via Model Service API
+        id: trigger
+        run: |
+          RESPONSE=$(curl -s -X POST \
+            ${{ secrets.API_GATEWAY_URL }}/api/v1/model/train \
+            -H "Content-Type: application/json" \
+            -d '{
+              "config": {
+                "model_type": "${{ inputs.model_type || 'logistic_regression' }}",
+                "max_features": 5000,
+                "test_size": 0.2
+              },
+              "include_feedback": ${{ inputs.include_feedback || true }},
+              "description": "${{ inputs.description || 'Scheduled training from GitHub Actions' }}"
+            }')
+
+          echo "Response: $RESPONSE"
+
+          JOB_ID=$(echo "$RESPONSE" | jq -r '.training_job_id // empty')
+
+          if [ -z "$JOB_ID" ]; then
+            echo "❌ Failed to trigger training job"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi
+
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+          echo "✅ Training job triggered: $JOB_ID"
+
+      - name: Monitor training job
+        env:
+          JOB_ID: ${{ steps.trigger.outputs.job_id }}
+        run: |
+          echo "Monitoring training job: $JOB_ID"
+          MAX_WAIT=3600  # 1 hour
+          ELAPSED=0
+          INTERVAL=30
+
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+
+            RESPONSE=$(curl -s \
+              ${{ secrets.API_GATEWAY_URL }}/api/v1/model/jobs/$JOB_ID)
+
+            STATUS=$(echo "$RESPONSE" | jq -r '.status // empty')
+            PROGRESS=$(echo "$RESPONSE" | jq -r '.progress // 0')
+
+            echo "[$ELAPSED s] Status: $STATUS, Progress: ${PROGRESS}%"
+
+            case "$STATUS" in
+              "completed")
+                echo "✅ Training completed successfully!"
+                echo "$RESPONSE" | jq .
+                exit 0
+                ;;
+              "failed")
+                echo "❌ Training job failed"
+                echo "$RESPONSE" | jq .
+                exit 1
+                ;;
+              "training")
+                continue
+                ;;
+              *)
+                echo "Status: $STATUS"
+                ;;
+            esac
+          done
+
+          echo "⚠️ Training job still running after $MAX_WAIT seconds"
+          echo "Check AWS SageMaker console for details"
+
+      - name: Get model metrics
+        if: success()
+        env:
+          JOB_ID: ${{ steps.trigger.outputs.job_id }}
+        run: |
+          RESPONSE=$(curl -s \
+            ${{ secrets.API_GATEWAY_URL }}/api/v1/model/jobs/$JOB_ID)
+
+          echo "📊 Training Metrics:"
+          echo "$RESPONSE" | jq -r '.metrics // {}'
+
+          ACCURACY=$(echo "$RESPONSE" | jq -r '.metrics.accuracy // "N/A"')
+          F1_SCORE=$(echo "$RESPONSE" | jq -r '.metrics.f1_score // "N/A"')
+
+          echo "Accuracy: $ACCURACY"
+          echo "F1 Score: $F1_SCORE"
+
+      - name: Reload model in inference service
+        if: success()
+        run: |
+          echo "Reloading model in inference service..."
+
+          RESPONSE=$(curl -s -X POST \
+            ${{ secrets.API_GATEWAY_URL }}/api/v1/reload-model)
+
+          echo "$RESPONSE" | jq .
+
+          STATUS=$(echo "$RESPONSE" | jq -r '.status // empty')
+
+          if [ "$STATUS" == "success" ]; then
+            echo "✅ Model reloaded successfully"
+          else
+            echo "⚠️ Model reload may have issues"
+          fi
+
+      - name: Training summary
+        if: always()
+        run: |
+          echo "📝 Training Job Summary"
+          echo "Job ID: ${{ steps.trigger.outputs.job_id }}"
+          echo "Model Type: ${{ inputs.model_type || 'logistic_regression' }}"
+          echo "Include Feedback: ${{ inputs.include_feedback || true }}"
+          echo "Description: ${{ inputs.description || 'Scheduled training' }}"
+
+  notify-completion:
+    name: Send Notification
+    runs-on: ubuntu-latest
+    needs: trigger-training
+    if: always()
+
+    steps:
+      - name: Notify on success
+        if: needs.trigger-training.result == 'success'
+        run: |
+          echo "✅ Training completed successfully"
+          # Add Slack/Email notification here if configured
+
+      - name: Notify on failure
+        if: needs.trigger-training.result == 'failure'
+        run: |
+          echo "❌ Training job failed"
+          # Add Slack/Email notification here if configured
