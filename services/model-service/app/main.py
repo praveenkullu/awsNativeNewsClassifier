@@ -347,29 +347,34 @@ async def list_model_versions(
 
     versions = []
 
-    # If database is available, use it
+    # If database is available, try it first
     if db:
         try:
             db_versions = await db.list_model_versions(limit=limit, offset=offset, status=status)
-            total = len(db_versions)
 
-            for v in db_versions:
-                versions.append(ModelVersionInfo(
-                    version=v.version,
-                    status=v.status or 'active',
-                    created_at=v.created_at.isoformat() if v.created_at else datetime.utcnow().isoformat(),
-                    metrics=v.metrics or {},
-                    training_job_id=v.training_job_id or '',
-                    is_production=v.is_production or False
-                ))
+            # Only use database results if we found any
+            if db_versions:
+                total = len(db_versions)
 
-            return ModelVersionsResponse(
-                versions=versions,
-                total=total,
-                limit=limit,
-                offset=offset,
-                correlation_id=correlation_id
-            )
+                for v in db_versions:
+                    versions.append(ModelVersionInfo(
+                        version=v.version,
+                        status=v.status or 'active',
+                        created_at=v.created_at.isoformat() if v.created_at else datetime.utcnow().isoformat(),
+                        metrics=v.metrics or {},
+                        training_job_id=v.training_job_id or '',
+                        is_production=v.is_production or False
+                    ))
+
+                return ModelVersionsResponse(
+                    versions=versions,
+                    total=total,
+                    limit=limit,
+                    offset=offset,
+                    correlation_id=correlation_id
+                )
+            else:
+                logger.info("Database returned empty results, trying S3 fallback")
         except Exception as e:
             logger.warning("Failed to fetch from database, falling back to S3", error=str(e))
 
