@@ -69,6 +69,8 @@ class HealthComponent {
             health.status,
             {
                 version: health.version,
+                model_version: health.model_version,
+                model_loaded: health.model_loaded,
                 timestamp: health.timestamp
             }
         );
@@ -122,9 +124,28 @@ class HealthComponent {
         if (metadata.version) {
             const versionDiv = createElement('div', {
                 style: 'font-size: 0.875rem; color: var(--gray-600); margin-top: var(--spacing-xs);',
-                textContent: `Version: ${metadata.version}`
+                textContent: `Service: v${metadata.version}`
             });
             card.appendChild(versionDiv);
+        }
+
+        // Model version
+        if (metadata.model_version) {
+            const modelVersionDiv = createElement('div', {
+                style: 'font-size: 0.875rem; color: var(--gray-600); margin-top: var(--spacing-xs);',
+                textContent: `Model: ${metadata.model_version}`
+            });
+            card.appendChild(modelVersionDiv);
+        }
+
+        // Model loaded status
+        if (metadata.model_loaded !== undefined) {
+            const modelStatusDiv = createElement('div', {
+                style: 'font-size: 0.875rem; margin-top: var(--spacing-xs);',
+                textContent: metadata.model_loaded ? '✓ Model Loaded' : '✗ Model Not Loaded'
+            });
+            modelStatusDiv.style.color = metadata.model_loaded ? 'var(--success)' : 'var(--error)';
+            card.appendChild(modelStatusDiv);
         }
 
         return card;
