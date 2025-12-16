@@ -10,7 +10,8 @@ from mangum import Mangum
 from app.main import app
 
 # Mangum adapter for FastAPI -> Lambda
-handler = Mangum(app, lifespan="off")
+# Enable lifespan to initialize database and S3 client
+handler = Mangum(app, lifespan="on")
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
