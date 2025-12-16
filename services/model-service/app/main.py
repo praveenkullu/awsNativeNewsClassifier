@@ -391,10 +391,23 @@ async def list_model_versions(
                 for prefix in response['CommonPrefixes']:
                     version_name = prefix['Prefix'].rstrip('/').split('/')[-1]
                     if version_name and version_name != 'latest':
+                        # Get the creation date from the first object in this version folder
+                        created_at = datetime.utcnow()
+                        try:
+                            objects_response = s3_client.list_objects_v2(
+                                Bucket=settings.s3_model_bucket,
+                                Prefix=prefix['Prefix'],
+                                MaxKeys=1
+                            )
+                            if 'Contents' in objects_response and objects_response['Contents']:
+                                created_at = objects_response['Contents'][0]['LastModified']
+                        except Exception:
+                            pass  # Use current time if we can't get LastModified
+
                         versions.append(ModelVersionInfo(
                             version=version_name,
                             status='active',
-                            created_at=datetime.utcnow().isoformat(),
+                            created_at=created_at.isoformat(),
                             metrics={},
                             training_job_id='',
                             is_production=False
