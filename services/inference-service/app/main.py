@@ -85,60 +85,46 @@ async def lifespan(app: FastAPI):
 
 
 async def load_model(version: Optional[str] = None):
-    """Load model from file or S3."""
+    """Load model from S3 directly (bypassing model service)."""
     global model, preprocessor, model_version
 
     try:
-        # Try to get model info from model service
-        async with httpx.AsyncClient() as client:
+        # Load directly from S3 - bypass model service
+        if s3_client and settings.s3_model_bucket:
             try:
-                response = await client.get(
-                    f"{settings.model_service_url}/api/v1/model/active",
-                    timeout=10.0
+                # Use specified version or default to 'latest'
+                target_version = version or 'latest'
+                s3_key = f"models/{target_version}/model.pkl"
+                local_path = f"/tmp/model_{target_version}.pkl"
+
+                logger.info("Loading model from S3", bucket=settings.s3_model_bucket, key=s3_key)
+
+                s3_client.download_file(
+                    settings.s3_model_bucket,
+                    s3_key,
+                    local_path
                 )
-                if response.status_code == 200:
-                    model_info = response.json()
-                    model_path = model_info.get('model_path')
-                    model_version = model_info.get('version', 'default')
-                    logger.info("Got model info from model service", version=model_version)
+
+                with open(local_path, 'rb') as f:
+                    model_data = pickle.load(f)
+                    model = model_data.get('pipeline') or model_data
+                    preprocessor = model_data.get('preprocessor')
+
+                model_version = target_version
+                logger.info("Model loaded successfully from S3", version=model_version, size_mb=os.path.getsize(local_path) / 1024 / 1024)
+
+            except ClientError as e:
+                logger.error("Failed to load model from S3", error=str(e), error_code=e.response['Error']['Code'])
             except Exception as e:
-                logger.warning("Failed to get model info from service", error=str(e))
-                model_path = settings.default_model_path
-
-        # Load model from file
-        if model_path and os.path.exists(model_path):
-            with open(model_path, 'rb') as f:
-                model_data = pickle.load(f)
-                model = model_data.get('pipeline') or model_data
-                preprocessor = model_data.get('preprocessor')
-            logger.info("Model loaded from file", path=model_path, version=model_version)
+                logger.error("Failed to process model file", error=str(e))
         else:
-            # Try S3 if configured
-            if s3_client and settings.s3_model_bucket:
-                try:
-                    s3_key = f"models/{version or 'latest'}/model.pkl"
-                    local_path = f"/tmp/model_{version or 'latest'}.pkl"
-
-                    s3_client.download_file(
-                        settings.s3_model_bucket,
-                        s3_key,
-                        local_path
-                    )
-
-                    with open(local_path, 'rb') as f:
-                        model_data = pickle.load(f)
-                        model = model_data.get('pipeline') or model_data
-                        preprocessor = model_data.get('preprocessor')
-
-                    logger.info("Model loaded from S3", bucket=settings.s3_model_bucket)
-                except ClientError as e:
-                    logger.warning("Failed to load model from S3", error=str(e))
+            logger.error("S3 client not configured", s3_client_available=s3_client is not None, bucket=settings.s3_model_bucket)
 
         if model is None:
-            logger.warning("No model loaded, predictions will fail")
+            logger.error("No model loaded - predictions will fail")
 
     except Exception as e:
-        logger.error("Error loading model", error=str(e))
+        logger.error("Error loading model", error=str(e), error_type=type(e).__name__)
 
 
 app = FastAPI(
